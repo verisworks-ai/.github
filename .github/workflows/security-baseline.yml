@@ -171,3 +171,18 @@ jobs:
           else
             echo ".gitignore guard: OK ✓"
           fi
+
+      - name: Notify profile README to update
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.PROFILE_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "PROFILE_DISPATCH_TOKEN not set — skipping profile README update"
+            exit 0
+          fi
+          curl -s -X POST \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/verisworks-ai/verisworks-ai/dispatches \
+            -d '{"event_type":"repo-added"}' && echo "profile dispatch sent ✓" || echo "profile dispatch failed (non-fatal)"
