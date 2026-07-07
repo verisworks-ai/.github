@@ -163,7 +163,8 @@ jobs:
           for pattern in ".env" ".env.local" "*.pem" "*.key" "secrets.json" \
                          "node_modules/" ".venv/" "__pycache__/" "*.p12" "*.pfx"; do
             if ! grep -qF "$pattern" .gitignore 2>/dev/null; then
-              MISSING="$MISSING\n  • $pattern"
+              MISSING="$MISSING
+  • $pattern"
             fi
           done
           if [ -n "$MISSING" ]; then
@@ -186,3 +187,23 @@ jobs:
             -H "Accept: application/vnd.github.v3+json" \
             https://api.github.com/repos/verisworks-ai/verisworks-ai/dispatches \
             -d '{"event_type":"repo-added"}' && echo "profile dispatch sent ✓" || echo "profile dispatch failed (non-fatal)"
+      - name: Changelog / docs sync guard
+        run: |
+          # When source files change, README and/or CHANGELOG must also change.
+          # Only enforced on push to main (not PRs — docs can lag during review).
+          if [ "${{ github.event_name }}" != "push" ] || [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "docs sync guard: skipped (PR or non-main) ✓"
+            exit 0
+          fi
+          BEFORE="${{ github.event.before }}"
+          if ! git cat-file -e "$BEFORE" 2>/dev/null; then
+            echo "docs sync guard: no previous commit (initial push) ✓"
+            exit 0
+          fi
+          SRC_CHANGED=$(git diff --name-only "$BEFORE" "${{ github.sha }}" | grep -E "^src/|^lib/|^core/|^pipeline/" | wc -l | tr -d " ")
+          DOC_CHANGED=$(git diff --name-only "$BEFORE" "${{ github.sha }}" | grep -E "^README|^CHANGELOG|^docs/" | wc -l | tr -d " ")
+          if [ "$SRC_CHANGED" -gt 0 ] && [ "$DOC_CHANGED" -eq 0 ]; then
+            echo "::warning::Source changed ($SRC_CHANGED files) but README/CHANGELOG/docs not updated. Consider documenting this change."
+          else
+            echo "docs sync guard: OK (src=$SRC_CHANGED doc=$DOC_CHANGED) ✓"
+          fi
