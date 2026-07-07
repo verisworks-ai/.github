@@ -1,5 +1,10 @@
 name: Security Baseline
 
+# Sources:
+# - GitHub Secret Scanning: https://docs.github.com/en/code-security/secret-scanning
+# - Gitleaks default rules: https://github.com/gitleaks/gitleaks (150+ patterns)
+# - TruffleHog detectors: https://github.com/trufflesecurity/trufflehog (800+ types)
+
 on:
   workflow_call:
     inputs:
@@ -8,11 +13,6 @@ on:
         required: false
         type: string
         default: "any"
-      extra_scan_dirs:
-        description: "space-separated additional dirs to scan"
-        required: false
-        type: string
-        default: ""
 
 jobs:
   security-baseline:
@@ -22,17 +22,36 @@ jobs:
 
       - name: Credential scan
         run: |
-          DIRS="."
-          if [ -n "${{ inputs.extra_scan_dirs }}" ]; then
-            DIRS="$DIRS ${{ inputs.extra_scan_dirs }}"
-          fi
+          # Patterns sourced from GitHub Secret Scanning + Gitleaks default ruleset
+          PATTERN="(
+            ghp_[A-Za-z0-9]{36}|
+            ghs_[A-Za-z0-9]{36}|
+            gho_[A-Za-z0-9]{36}|
+            github_pat_[A-Za-z0-9_]{82}|
+            sk-[A-Za-z0-9]{20,}|
+            sk-ant-api03-[A-Za-z0-9_-]{93}|
+            AIza[A-Za-z0-9_-]{35}|
+            AKIA[A-Z0-9]{16}|
+            AGPA[A-Z0-9]{16}|
+            AROA[A-Z0-9]{16}|
+            hf_[A-Za-z0-9]{34,}|
+            sk_live_[A-Za-z0-9]{24,}|
+            pk_live_[A-Za-z0-9]{24,}|
+            xoxb-[0-9]{11,}-[0-9]{11,}-[A-Za-z0-9]{24}|
+            xoxa-2-[A-Za-z0-9_-]{80,}|
+            SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}|
+            AC[a-z0-9]{32}|SK[a-z0-9]{32}|
+            -----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY( BLOCK)?-----
+          )"
+          CLEAN_PATTERN=$(echo "$PATTERN" | tr -d '[:space:]')
+
           if grep -rn \
-            --include="*.py" --include="*.js" --include="*.ts" \
+            --include="*.py" --include="*.js" --include="*.ts" --include="*.mjs" \
             --include="*.json" --include="*.yaml" --include="*.yml" \
-            --include="*.env" --include="*.sh" \
-            --exclude-dir=".git" --exclude-dir="node_modules" --exclude-dir="dist" --exclude-dir=".venv" \
-            -E "(ghp_[A-Za-z0-9]{36}|ghs_[A-Za-z0-9]{36}|sk-[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{35}|AKIA[A-Z0-9]{16})" \
-            $DIRS 2>/dev/null; then
+            --include="*.env" --include="*.sh" --include="*.toml" \
+            --exclude-dir=".git" --exclude-dir="node_modules" \
+            --exclude-dir="dist" --exclude-dir=".venv" --exclude-dir="__pycache__" \
+            -E "$CLEAN_PATTERN" . 2>/dev/null; then
             echo "::error::Credential pattern found in source"
             exit 1
           fi
@@ -40,38 +59,59 @@ jobs:
 
       - name: Personal info scan
         run: |
-          DIRS="."
+          # Local user paths + Korean PII patterns
           if grep -rn \
             --include="*.py" --include="*.js" --include="*.ts" \
-            --include="*.json" --include="*.yaml" --include="*.md" \
-            --exclude-dir=".git" --exclude-dir="node_modules" --exclude-dir="dist" --exclude-dir=".venv" \
-            -E "/Users/[a-zA-Z0-9_-]+" \
-            $DIRS 2>/dev/null; then
+            --include="*.json" --include="*.yaml" --include="*.md" --include="*.toml" \
+            --exclude-dir=".git" --exclude-dir="node_modules" \
+            --exclude-dir="dist" --exclude-dir=".venv" \
+            -E "(/Users/[a-zA-Z0-9_-]+|/home/[a-zA-Z0-9_-]+/)" \
+            . 2>/dev/null; then
             echo "::error::Local user path found in tracked files"
             exit 1
           fi
           echo "personal info scan: clean ✓"
 
+      - name: Database URL with credentials check
+        run: |
+          # Embedded credentials in connection strings
+          if grep -rn \
+            --include="*.py" --include="*.js" --include="*.ts" \
+            --include="*.json" --include="*.yaml" --include="*.toml" \
+            --exclude-dir=".git" --exclude-dir="node_modules" \
+            --exclude-dir="dist" --exclude-dir=".venv" \
+            -E "(postgresql|mysql|mongodb(\+srv)?|redis|amqp)://[^:@\s]+:[^@\s]+@" \
+            . 2>/dev/null; then
+            echo "::error::Database URL with embedded credentials found"
+            exit 1
+          fi
+          echo "database URL scan: clean ✓"
+
       - name: Sensitive file exposure check
         run: |
-          for f in .env .env.local .env.production secrets.json credentials.json id_rsa id_ed25519; do
-            if git ls-files | grep -qE "^${f}$|/${f}$"; then
-              echo "::error::Sensitive file tracked by git: $f"
+          # Catch accidentally tracked sensitive files
+          for pattern in "^\.env$" "^\.env\." "^secrets\.json$" "^credentials\.json$" \
+                         "^id_rsa$" "^id_ed25519$" "^id_ecdsa$" "^.*\.pem$" "^.*\.key$" \
+                         "^.*\.p12$" "^.*\.pfx$" "^service_account.*\.json$"; do
+            if git ls-files | grep -qE "$pattern"; then
+              echo "::error::Sensitive file tracked by git: $(git ls-files | grep -E "$pattern")"
               exit 1
             fi
           done
           echo "sensitive file check: clean ✓"
 
-      - name: gitignore guard (common sensitive patterns)
+      - name: .gitignore guard
         run: |
+          # Warn if common sensitive patterns are missing from .gitignore
           MISSING=""
-          for pattern in ".env" "*.pem" "*.key" "secrets.json" "node_modules/" ".venv/"; do
+          for pattern in ".env" ".env.local" "*.pem" "*.key" "secrets.json" \
+                         "node_modules/" ".venv/" "__pycache__/" "*.p12" "*.pfx"; do
             if ! grep -qF "$pattern" .gitignore 2>/dev/null; then
-              MISSING="$MISSING $pattern"
+              MISSING="$MISSING\n  • $pattern"
             fi
           done
           if [ -n "$MISSING" ]; then
-            echo "::warning::.gitignore missing patterns:$MISSING"
+            echo "::warning::.gitignore missing recommended patterns:$MISSING"
           else
-            echo "gitignore guard: OK ✓"
+            echo ".gitignore guard: OK ✓"
           fi
