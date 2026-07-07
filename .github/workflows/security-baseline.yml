@@ -2,8 +2,9 @@ name: Security Baseline
 
 # Sources:
 # - GitHub Secret Scanning: https://docs.github.com/en/code-security/secret-scanning
-# - Gitleaks default rules: https://github.com/gitleaks/gitleaks (150+ patterns)
-# - TruffleHog detectors: https://github.com/trufflesecurity/trufflehog (800+ types)
+# - Gitleaks default rules: https://github.com/gitleaks/gitleaks
+# - TruffleHog detectors: https://github.com/trufflesecurity/trufflehog
+# - GitHub Actions reusable workflows: https://docs.github.com/en/actions/sharing-automations/reusing-workflows
 
 on:
   workflow_call:
@@ -13,16 +14,54 @@ on:
         required: false
         type: string
         default: "any"
+      allowed_author_name:
+        description: "public commit/package author name"
+        required: false
+        type: string
+        default: "veris"
+      allowed_author_email:
+        description: "public commit/package author email"
+        required: false
+        type: string
+        default: "hello@veris.kr"
 
 jobs:
   security-baseline:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Public git identity check
+        run: |
+          ALLOWED_NAME='${{ inputs.allowed_author_name }}'
+          ALLOWED_EMAIL='${{ inputs.allowed_author_email }}'
+          BAD=0
+
+          # Check the pushed commit range when GitHub provides it; fall back to HEAD.
+          if [ -n "${{ github.event.before }}" ] && git cat-file -e "${{ github.event.before }}" 2>/dev/null; then
+            RANGE="${{ github.event.before }}..${{ github.sha }}"
+          else
+            RANGE="HEAD"
+          fi
+
+          while IFS='|' read -r SHA NAME EMAIL; do
+            [ -n "$SHA" ] || continue
+            if [ "$NAME" != "$ALLOWED_NAME" ] || [ "$EMAIL" != "$ALLOWED_EMAIL" ]; then
+              echo "::error::Non-public git identity on ${SHA}: ${NAME} <${EMAIL}>. Expected ${ALLOWED_NAME} <${ALLOWED_EMAIL}>"
+              BAD=1
+            fi
+          done < <(git log --format='%h|%an|%ae' "$RANGE")
+
+          if [ "$BAD" -ne 0 ]; then
+            exit 1
+          fi
+          echo "git identity check: ${ALLOWED_NAME} <${ALLOWED_EMAIL}> ✓"
 
       - name: Credential scan
         run: |
-          # Patterns sourced from GitHub Secret Scanning + Gitleaks default ruleset
+          # Patterns sourced from GitHub Secret Scanning + Gitleaks default ruleset.
           PATTERN="(
             ghp_[A-Za-z0-9]{36}|
             ghs_[A-Za-z0-9]{36}|
@@ -41,6 +80,7 @@ jobs:
             xoxa-2-[A-Za-z0-9_-]{80,}|
             SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}|
             AC[a-z0-9]{32}|SK[a-z0-9]{32}|
+            npm_[A-Za-z0-9]{36,}|
             -----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY( BLOCK)?-----
           )"
           CLEAN_PATTERN=$(echo "$PATTERN" | tr -d '[:space:]')
@@ -59,7 +99,7 @@ jobs:
 
       - name: Personal info scan
         run: |
-          # Local user paths + Korean PII patterns
+          # Local user paths. Personal author identity is enforced by the git/package author guards.
           if grep -rn \
             --include="*.py" --include="*.js" --include="*.ts" \
             --include="*.json" --include="*.yaml" --include="*.md" --include="*.toml" \
@@ -72,9 +112,25 @@ jobs:
           fi
           echo "personal info scan: clean ✓"
 
+      - name: Package author guard
+        run: |
+          ALLOWED_NAME='${{ inputs.allowed_author_name }}'
+          ALLOWED_EMAIL='${{ inputs.allowed_author_email }}'
+
+          if [ -f package.json ]; then
+            node -e "const fs=require('node:fs'); const pkg=JSON.parse(fs.readFileSync('package.json','utf8')); const expected=process.env.ALLOWED_NAME+' <'+process.env.ALLOWED_EMAIL+'>'; let author=pkg.author; if(author&&typeof author==='object') author=(author.name||'')+' <'+(author.email||'')+'>'; if(!author){console.error('::error::package.json author is missing. Expected '+expected); process.exit(1)} if(author!==expected){console.error('::error::package.json author is '+author+'. Expected '+expected); process.exit(1)} console.log('package.json author guard: '+expected+' ✓')"
+          fi
+
+          if [ -f pyproject.toml ]; then
+            python3 -c "import os,sys,tomllib; expected_name=os.environ['ALLOWED_NAME']; expected_email=os.environ['ALLOWED_EMAIL']; data=tomllib.load(open('pyproject.toml','rb')); authors=data.get('project',{}).get('authors',[]); bad=[a for a in authors if a.get('name')!=expected_name or a.get('email')!=expected_email]; print(f'pyproject.toml author guard: {expected_name} <{expected_email}> ✓') if authors and not bad else None; (print(f'::error::pyproject.toml authors must be {expected_name} <{expected_email}>') or sys.exit(1)) if bad else None"
+          fi
+        env:
+          ALLOWED_NAME: ${{ inputs.allowed_author_name }}
+          ALLOWED_EMAIL: ${{ inputs.allowed_author_email }}
+
       - name: Database URL with credentials check
         run: |
-          # Embedded credentials in connection strings
+          # Embedded credentials in connection strings.
           if grep -rn \
             --include="*.py" --include="*.js" --include="*.ts" \
             --include="*.json" --include="*.yaml" --include="*.toml" \
@@ -89,7 +145,7 @@ jobs:
 
       - name: Sensitive file exposure check
         run: |
-          # Catch accidentally tracked sensitive files
+          # Catch accidentally tracked sensitive files.
           for pattern in "^\.env$" "^\.env\." "^secrets\.json$" "^credentials\.json$" \
                          "^id_rsa$" "^id_ed25519$" "^id_ecdsa$" "^.*\.pem$" "^.*\.key$" \
                          "^.*\.p12$" "^.*\.pfx$" "^service_account.*\.json$"; do
@@ -102,7 +158,7 @@ jobs:
 
       - name: .gitignore guard
         run: |
-          # Warn if common sensitive patterns are missing from .gitignore
+          # Warn if common sensitive patterns are missing from .gitignore.
           MISSING=""
           for pattern in ".env" ".env.local" "*.pem" "*.key" "secrets.json" \
                          "node_modules/" ".venv/" "__pycache__/" "*.p12" "*.pfx"; do
