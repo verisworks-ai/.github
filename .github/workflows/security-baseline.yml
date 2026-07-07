@@ -1,0 +1,77 @@
+name: Security Baseline
+
+on:
+  workflow_call:
+    inputs:
+      language:
+        description: "primary language: node | python | any"
+        required: false
+        type: string
+        default: "any"
+      extra_scan_dirs:
+        description: "space-separated additional dirs to scan"
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  security-baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Credential scan
+        run: |
+          DIRS="."
+          if [ -n "${{ inputs.extra_scan_dirs }}" ]; then
+            DIRS="$DIRS ${{ inputs.extra_scan_dirs }}"
+          fi
+          if grep -rn \
+            --include="*.py" --include="*.js" --include="*.ts" \
+            --include="*.json" --include="*.yaml" --include="*.yml" \
+            --include="*.env" --include="*.sh" \
+            --exclude-dir=".git" --exclude-dir="node_modules" --exclude-dir="dist" --exclude-dir=".venv" \
+            -E "(ghp_[A-Za-z0-9]{36}|ghs_[A-Za-z0-9]{36}|sk-[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{35}|AKIA[A-Z0-9]{16})" \
+            $DIRS 2>/dev/null; then
+            echo "::error::Credential pattern found in source"
+            exit 1
+          fi
+          echo "credential scan: clean ✓"
+
+      - name: Personal info scan
+        run: |
+          DIRS="."
+          if grep -rn \
+            --include="*.py" --include="*.js" --include="*.ts" \
+            --include="*.json" --include="*.yaml" --include="*.md" \
+            --exclude-dir=".git" --exclude-dir="node_modules" --exclude-dir="dist" --exclude-dir=".venv" \
+            -E "/Users/[a-zA-Z0-9_-]+" \
+            $DIRS 2>/dev/null; then
+            echo "::error::Local user path found in tracked files"
+            exit 1
+          fi
+          echo "personal info scan: clean ✓"
+
+      - name: Sensitive file exposure check
+        run: |
+          for f in .env .env.local .env.production secrets.json credentials.json id_rsa id_ed25519; do
+            if git ls-files | grep -qE "^${f}$|/${f}$"; then
+              echo "::error::Sensitive file tracked by git: $f"
+              exit 1
+            fi
+          done
+          echo "sensitive file check: clean ✓"
+
+      - name: gitignore guard (common sensitive patterns)
+        run: |
+          MISSING=""
+          for pattern in ".env" "*.pem" "*.key" "secrets.json" "node_modules/" ".venv/"; do
+            if ! grep -qF "$pattern" .gitignore 2>/dev/null; then
+              MISSING="$MISSING $pattern"
+            fi
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::warning::.gitignore missing patterns:$MISSING"
+          else
+            echo "gitignore guard: OK ✓"
+          fi
