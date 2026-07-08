@@ -43,9 +43,13 @@ jobs:
           ALLOWED_EMAIL='${{ inputs.allowed_author_email }}'
           BAD=0
 
-          # Check the pushed commit range when GitHub provides it; fall back to HEAD.
-          if [ -n "${{ github.event.before }}" ] && git cat-file -e "${{ github.event.before }}" 2>/dev/null; then
-            RANGE="${{ github.event.before }}..${{ github.sha }}"
+          # Check only the pushed commit range. workflow_dispatch has no `before`,
+          # so fall back to the latest commit instead of scanning full history.
+          BEFORE='${{ github.event.before }}'
+          if [ -n "$BEFORE" ] && git cat-file -e "$BEFORE" 2>/dev/null; then
+            RANGE="$BEFORE..HEAD"
+          elif git rev-parse HEAD~1 >/dev/null 2>&1; then
+            RANGE="HEAD~1..HEAD"
           else
             RANGE="HEAD"
           fi
