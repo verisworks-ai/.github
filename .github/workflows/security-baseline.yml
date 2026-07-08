@@ -24,6 +24,10 @@ on:
         required: false
         type: string
         default: "hello@veris.kr"
+    secrets:
+      PROFILE_DISPATCH_TOKEN:
+        description: "Optional token used to dispatch verisworks-ai profile README refresh"
+        required: false
 
 jobs:
   security-baseline:
@@ -163,8 +167,7 @@ jobs:
           for pattern in ".env" ".env.local" "*.pem" "*.key" "secrets.json" \
                          "node_modules/" ".venv/" "__pycache__/" "*.p12" "*.pfx"; do
             if ! grep -qF "$pattern" .gitignore 2>/dev/null; then
-              MISSING="$MISSING
-  • $pattern"
+              MISSING="${MISSING}\n  • ${pattern}"
             fi
           done
           if [ -n "$MISSING" ]; then
